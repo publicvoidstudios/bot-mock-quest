@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "lib": ["ES2015", "DOM", "ES2022"],
+    "baseUrl": ".",
+    "paths": {
+      "axios": ["node_modules/axios/dist/axios"]
+    }
+  },
+}
