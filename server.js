@@ -67,7 +67,7 @@ const getUnassignedTasks = async () => {
     let result = null;
     await db.select().from("tasks")
         .then(data => {
-        result = data.filter(task => task.assignedTo === null);
+        result = data.filter(task => task.assigned_to === null);
     })
         .catch(err => {
         console.error(err);
@@ -129,13 +129,11 @@ const askLater = async (task) => {
     if (task.ask_later !== null) {
         for (const user_id of task.ask_later) {
             await sendMessage(user_id, {
+                id: Date.now(),
                 author_id: -1,
-                body: `Asking again! Can you accept task: ${task.name}?`,
-                was_read: false
-            })
-                .then(res => {
-                console.log(`Send Message res:`);
-                console.log(res);
+                body: JSON.stringify(task),
+                was_read: false,
+                status: 'again'
             });
         }
         console.log(`Clearing task ask later queue:  ${task.name}`);
@@ -148,9 +146,11 @@ const askLater = async (task) => {
             console.log(`Task: ${task.name} is completely expired...`);
             //Send message to author
             await sendMessage(task.author_id, {
-                author_id: -1,
-                body: `Sorry, but bot failed to find performer for a task you created: ${task.name}. Please, try again.`,
-                was_read: false
+                id: Date.now(),
+                author_id: task.author_id,
+                body: JSON.stringify(task),
+                was_read: false,
+                status: "failed"
             });
             console.log(`Sent warning message to task's author.`);
             //Remove task from db
@@ -218,11 +218,12 @@ app.post('/api/v1/post/user', (req, res) => {
     })
         .returning(["username", "role", "hashed_password"])
         .then(data => {
-        console.log(data);
         if (data && data.length > 0) {
+            console.log(`User registered`);
             return res.status(200).send({ message: 'Successfully registered user', data: data });
         }
         else {
+            console.log(`Failed to register user`);
             return res.status(400).send({ message: 'Failed to register user' });
         }
     })
@@ -253,7 +254,6 @@ app.post("/api/v1/post/task", async (req, res) => {
     })
         .returning('*')
         .then(data => {
-        console.log(data);
         if (data && data.length > 0) {
             task = data[0];
             statusCode = 200;
@@ -301,13 +301,13 @@ app.post("/api/v1/post/task", async (req, res) => {
             await db('users').where('id', user.id).select('messages')
                 .then(data => {
                 if (data && data.length > 0) {
-                    console.log(`got messages:`);
-                    console.log(data);
                     messages = data[0].messages || [];
                     messages.push({
+                        id: Date.now(),
                         body: JSON.stringify(task),
                         author_id: author_id,
-                        was_read: false
+                        was_read: false,
+                        status: 'new'
                     });
                     statusCode = 200;
                     resMessage += 'Temporarily stored messages. ';
@@ -353,7 +353,6 @@ app.post("/api/v1/post/task", async (req, res) => {
 app.get('/api/v1/get/users', (req, res) => {
     db.select().from('users')
         .then(users => {
-        console.log(users);
         res.status(200).send(users);
     })
         .catch(err => {
@@ -365,7 +364,6 @@ app.get('/api/v1/get/users', (req, res) => {
 app.get('/api/v1/get/tasks', (req, res) => {
     db.select().from('tasks')
         .then(tasks => {
-        console.log(tasks);
         res.status(200).send(tasks);
     })
         .catch(err => {
@@ -396,8 +394,6 @@ const assignTaskToUser = async (task_id, user_id) => {
         .select("tasks")
         .then(tasks => {
         if (tasks) {
-            console.log(`TASKS:`);
-            console.log(tasks);
             user_tasks = tasks[0]?.tasks || [];
             user_tasks.push(task);
         }
@@ -485,7 +481,13 @@ const postponeTask = async (task_id, user_id) => {
         return false;
     }
     else {
-        task.ask_later.push(user_id);
+        if (task.ask_later !== null) {
+            task.ask_later.push(user_id);
+        }
+        else {
+            task.ask_later = [];
+            task.ask_later.push(user_id);
+        }
     }
     await db('tasks')
         .where('id', task_id)
@@ -506,15 +508,43 @@ const postponeTask = async (task_id, user_id) => {
 };
 const removeMessage = async (user_id, message_id) => {
     try {
-        const updatedUser = await db.raw('UPDATE users SET messages = array_remove(messages, jsonb_build_object(\'body\', \'id\', ?)::jsonb) WHERE id = ?', [message_id, user_id]);
-        if (updatedUser.rowCount > 0) {
-            console.log(`Message with ID ${message_id} removed for user ${user_id}`);
-            return true;
-        }
-        else {
-            console.warn(`User with ID ${user_id} not found`);
-            return false;
-        }
+        console.log(`Removing message: ${message_id} from user ${user_id}`);
+        let messages = [];
+        await db('users')
+            .where('id', user_id)
+            .select('messages')
+            .then(data => {
+            if (data && data.length > 0) {
+                messages = data[0].messages;
+                console.log('Current messages:');
+                console.log(messages);
+                messages = messages.filter(message => message.id !== message_id);
+                console.log('Filtered messages:');
+                console.log(messages);
+            }
+            else {
+                console.log(`Failed to remove message... ${data}`);
+            }
+        })
+            .catch(err => {
+            console.error(err);
+        });
+        await db('users')
+            .where('id', user_id)
+            .select('messages')
+            .update('messages', messages)
+            .then(data => {
+            if (data) {
+                console.log(`Message was removed from user ${user_id}!`);
+                console.log(data);
+            }
+            else {
+                console.log(`Failed to remove message... ${data}`);
+            }
+        })
+            .catch(err => {
+            console.error(err);
+        });
     }
     catch (error) {
         console.error('An error occurred while removing the message:', error);
@@ -522,8 +552,8 @@ const removeMessage = async (user_id, message_id) => {
     }
 };
 app.put("/api/v1/put/tasks", async (req, res) => {
-    const { user_id, task_id, action } = req.body;
-    if (!user_id || !task_id) {
+    const { user_id, task_id, action, message_id } = req.body;
+    if (!user_id || !task_id || !action) {
         return res.status(400).send({ message: 'Missing required field' });
     }
     switch (action) {
@@ -531,7 +561,7 @@ app.put("/api/v1/put/tasks", async (req, res) => {
             const accept_result = await assignTaskToUser(task_id, user_id);
             if (accept_result) {
                 //Remove message
-                await removeMessage(user_id, task_id);
+                await removeMessage(user_id, message_id);
                 return res.status(200).send({ message: 'Task accepted successfully' });
             }
             else {
@@ -540,7 +570,7 @@ app.put("/api/v1/put/tasks", async (req, res) => {
         case 'decline':
             const decline_result = await declineTask(task_id, user_id);
             if (decline_result) {
-                await removeMessage(user_id, task_id);
+                await removeMessage(user_id, message_id);
                 return res.status(200).send({ message: 'Task declined successfully' });
             }
             else {
@@ -556,12 +586,32 @@ app.put("/api/v1/put/tasks", async (req, res) => {
             }
     }
 });
+app.delete("/api/v1/delete/messages", async (req, res) => {
+    const { user_id, message_id } = req.body;
+    if (!user_id || !message_id) {
+        if (!user_id && !message_id) {
+            return res.status(400).send({ message: 'Missing both fields' });
+        }
+        if (!user_id && message_id) {
+            return res.status(400).send({ message: 'Missing user_id' });
+        }
+        if (user_id && !message_id) {
+            return res.status(400).send({ message: 'Missing message_id' });
+        }
+        return res.status(400).send({ message: 'Missing required field' });
+    }
+    try {
+        await removeMessage(user_id, message_id);
+        return res.status(200).send({ message: 'Message deleted successfully' });
+    }
+    catch (error) {
+        console.error(error);
+        return res.status(400).send({ message: 'Something went wrong. Message not deleted successfully' });
+    }
+});
 //Initiate pooling
 //Form list of users
 const filterUsers = (task, users) => {
-    console.log(`filter users func. TASK: ${task}. USERS: ${users}`);
-    console.log(task);
-    console.log(users);
     return users.filter(user => task.roles.includes(user.role));
 };
 // In fact - waiting state
